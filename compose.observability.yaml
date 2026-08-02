@@ -4,7 +4,7 @@ services:
     container_name: jenkins-prometheus
     restart: unless-stopped
     networks:
-      - jenkins
+      - ci
       - observability
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -63,11 +63,11 @@ services:
 
 networks:
   observability:
-    name: jenkins-observability
+    name: ${OBSERVABILITY_NETWORK_NAME:-compose-stack-observability}
     driver: bridge
 
 volumes:
   prometheus-data:
-    name: jenkins-prometheus-data
+    name: ${PROMETHEUS_DATA_VOLUME:-compose-stack-prometheus-data}
   grafana-data:
-    name: jenkins-grafana-data
+    name: ${GRAFANA_DATA_VOLUME:-compose-stack-grafana-data}
