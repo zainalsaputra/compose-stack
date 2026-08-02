@@ -121,6 +121,9 @@ Review and update `.env` before starting the stack. Important values:
 | `JENKINS_AGENT_PORT` | `50000` | Jenkins inbound agent port. |
 | `NGINX_HTTP_PORT` | `9000` | Nginx reverse proxy port on the host. |
 | `HOST_HOME` | `/srv/jenkins/home` | Host directory mounted to `/home` in Jenkins. |
+| `PROMETHEUS_PORT` | `9090` | Prometheus HTTP port on the host. |
+| `GRAFANA_PORT` | `3030` | Grafana HTTP port on the host. |
+| `GRAFANA_INTERNAL_PORT` | `3030` | Grafana HTTP port inside the container, mapped through `GF_SERVER_HTTP_PORT`. |
 | `GRAFANA_ADMIN_PASSWORD` | `change-me` | Initial Grafana admin password. Change this before production use. |
 
 Prepare the shared host directory:
@@ -165,12 +168,21 @@ Access endpoints:
 | Endpoint | URL |
 | --- | --- |
 | Prometheus | `http://SERVER_IP:9090` |
-| Grafana | `http://SERVER_IP:3001` |
+| Grafana | `http://SERVER_IP:3030` |
 
 Grafana uses the credentials from `.env`:
 
 - `GRAFANA_ADMIN_USER`
 - `GRAFANA_ADMIN_PASSWORD`
+
+The observability Compose file is equivalent to these base commands, with persistent volumes and provisioning added:
+
+```bash
+docker run -d --name prometheus -p 9090:9090 prom/prometheus
+docker run -d --name grafana -p 3030:3030 -e "GF_SERVER_HTTP_PORT=3030" grafana/grafana
+```
+
+On Ubuntu, Prometheus uses `host.docker.internal:9000` to scrape Jenkins through Nginx. The Compose file maps `host.docker.internal` to Docker's `host-gateway` automatically.
 
 ## Backup And Restore
 
