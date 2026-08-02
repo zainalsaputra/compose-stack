@@ -1,0 +1,73 @@
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: jenkins-prometheus
+    restart: unless-stopped
+    networks:
+      - jenkins
+      - observability
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana-oss:11.4.0
+    container_name: jenkins-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    networks:
+      - observability
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: jenkins-node-exporter
+    restart: unless-stopped
+    networks:
+      - observability
+    command:
+      - --path.rootfs=/host
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: jenkins-cadvisor
+    restart: unless-stopped
+    privileged: true
+    networks:
+      - observability
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+
+networks:
+  observability:
+    name: jenkins-observability
+    driver: bridge
+
+volumes:
+  prometheus-data:
+    name: jenkins-prometheus-data
+  grafana-data:
+    name: jenkins-grafana-data
