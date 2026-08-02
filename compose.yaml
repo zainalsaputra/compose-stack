@@ -1,0 +1,70 @@
+name: ${COMPOSE_PROJECT_NAME:-jenkins-stack}
+
+services:
+  jenkins:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${JENKINS_IMAGE:-myjenkins-blueocean:lts}
+    container_name: jenkins-blueocean
+    restart: on-failure
+    depends_on:
+      docker:
+        condition: service_started
+    networks:
+      - jenkins
+    environment:
+      DOCKER_HOST: tcp://docker:2376
+      DOCKER_CERT_PATH: /certs/client
+      DOCKER_TLS_VERIFY: "1"
+      JAVA_OPTS: ${JENKINS_JAVA_OPTS:--Dhudson.plugins.git.GitSCM.ALLOW_LOCAL_CHECKOUT=true}
+    ports:
+      - "${JENKINS_HTTP_PORT:-49000}:8080"
+      - "${JENKINS_AGENT_PORT:-50000}:50000"
+    volumes:
+      - jenkins-data:/var/jenkins_home
+      - jenkins-docker-certs:/certs/client:ro
+      - ${HOST_HOME:-/srv/jenkins/home}:/home
+
+  nginx:
+    image: nginx:stable
+    container_name: jenkins-nginx
+    restart: unless-stopped
+    depends_on:
+      jenkins:
+        condition: service_started
+    networks:
+      - jenkins
+    ports:
+      - "${NGINX_HTTP_PORT:-9000}:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+
+  docker:
+    image: docker:dind
+    container_name: docker
+    restart: on-failure
+    privileged: true
+    networks:
+      jenkins:
+        aliases:
+          - docker
+    environment:
+      DOCKER_TLS_CERTDIR: /certs
+    ports:
+      - "127.0.0.1:${DOCKER_DIND_PORT:-2376}:2376"
+      - "${DIND_APP_PORT:-3000}:3000"
+    volumes:
+      - jenkins-docker-certs:/certs/client
+      - jenkins-data:/var/jenkins_home
+
+networks:
+  jenkins:
+    name: jenkins
+    driver: bridge
+
+volumes:
+  jenkins-data:
+    name: jenkins-data
+  jenkins-docker-certs:
+    name: jenkins-docker-certs
