@@ -373,7 +373,13 @@ if [[ "${ACTION}" == "update" ]]; then
 fi
 
 log "Starting the ${STACK_MODE} stack."
-compose up --detach --build
+if [[ "${ACTION}" == "update" ]]; then
+  compose up --detach
+else
+  compose up --detach --build
+fi
+log "Refreshing the Nginx upstream after service reconciliation."
+compose restart nginx
 wait_for_services
 verify_endpoints
 print_summary

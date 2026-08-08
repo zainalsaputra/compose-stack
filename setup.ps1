@@ -325,6 +325,71 @@ function Validate-Configuration {
     Invoke-Compose -Arguments @('config', '--quiet')
 }
 
+function Test-TcpPortAvailable {
+    param([Parameter(Mandatory)][int]$Port)
+
+    $listener = $null
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, $Port)
+        $listener.Start()
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($listener) {
+            $listener.Stop()
+        }
+    }
+}
+
+function Find-AvailableTcpPort {
+    param([Parameter(Mandatory)][int]$StartPort)
+
+    for ($candidate = $StartPort; $candidate -le 65535; $candidate++) {
+        if (Test-TcpPortAvailable -Port $candidate) {
+            return $candidate
+        }
+    }
+
+    throw "No available TCP port was found at or above $StartPort."
+}
+
+function Ensure-AvailableHostPorts {
+    $portContracts = @(
+        [pscustomobject]@{ Variable = 'JENKINS_HTTP_PORT'; Fallback = 49000; Service = 'jenkins' },
+        [pscustomobject]@{ Variable = 'JENKINS_AGENT_PORT'; Fallback = 50000; Service = 'jenkins' },
+        [pscustomobject]@{ Variable = 'NGINX_HTTP_PORT'; Fallback = 9000; Service = 'nginx' }
+    )
+
+    if ($WithObservability) {
+        $portContracts += @(
+            [pscustomobject]@{ Variable = 'PROMETHEUS_PORT'; Fallback = 9090; Service = 'prometheus' },
+            [pscustomobject]@{ Variable = 'GRAFANA_PORT'; Fallback = 3030; Service = 'grafana' }
+        )
+    }
+
+    foreach ($contract in $portContracts) {
+        $serviceState = Get-ServiceState -Service $contract.Service
+        if ($serviceState -in @('healthy', 'running')) {
+            continue
+        }
+
+        $configuredValue = Read-EnvValue -Name $contract.Variable -Fallback ([string]$contract.Fallback)
+        $configuredPort = 0
+        if (-not [int]::TryParse($configuredValue, [ref]$configuredPort) -or $configuredPort -lt 1 -or $configuredPort -gt 65535) {
+            throw "$($contract.Variable) must be a TCP port between 1 and 65535. Current value: '$configuredValue'."
+        }
+
+        if (-not (Test-TcpPortAvailable -Port $configuredPort)) {
+            $replacementPort = Find-AvailableTcpPort -StartPort ($configuredPort + 1)
+            Set-EnvValue -Name $contract.Variable -Value ([string]$replacementPort)
+            Write-Log "$($contract.Variable) port $configuredPort is unavailable; using $replacementPort instead."
+        }
+    }
+}
+
 $ExpectedServices = @('docker', 'jenkins', 'nginx')
 if ($WithObservability) {
     $ExpectedServices += @('prometheus', 'grafana', 'node-exporter', 'cadvisor')
@@ -423,6 +488,43 @@ function Test-Endpoints {
     }
 }
 
+function Test-ObservabilityIntegrations {
+    if (-not $WithObservability) {
+        return
+    }
+
+    $prometheusPort = Read-EnvValue -Name 'PROMETHEUS_PORT' -Fallback '9090'
+    $targetResponse = Invoke-RestMethod -UseBasicParsing -Uri "http://127.0.0.1:$prometheusPort/api/v1/targets" -TimeoutSec 10
+    $targets = @($targetResponse.data.activeTargets)
+    $unhealthyTargets = @($targets | Where-Object { $_.health -ne 'up' })
+
+    foreach ($target in $targets) {
+        Write-Log "Prometheus target '$($target.labels.job)' is $($target.health)."
+    }
+
+    if ($targets.Count -lt 4 -or $unhealthyTargets.Count -gt 0) {
+        throw "Prometheus targets are not all healthy. Found $($targets.Count) targets and $($unhealthyTargets.Count) unhealthy targets."
+    }
+
+    $grafanaPort = Read-EnvValue -Name 'GRAFANA_PORT' -Fallback '3030'
+    $grafanaUser = Read-EnvValue -Name 'GRAFANA_ADMIN_USER' -Fallback 'admin'
+    $grafanaPassword = Read-EnvValue -Name 'GRAFANA_ADMIN_PASSWORD' -Fallback ''
+    if ([string]::IsNullOrWhiteSpace($grafanaPassword)) {
+        throw 'GRAFANA_ADMIN_PASSWORD cannot be empty when validating Grafana.'
+    }
+
+    $credentialText = [string]::Concat($grafanaUser, ':', $grafanaPassword)
+    $token = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($credentialText))
+    $headers = @{ Authorization = "Basic $token" }
+    $datasource = Invoke-RestMethod -UseBasicParsing -Uri "http://127.0.0.1:$grafanaPort/api/datasources/name/Prometheus" -Headers $headers -TimeoutSec 10
+    $datasourceHealth = Invoke-RestMethod -UseBasicParsing -Uri "http://127.0.0.1:$grafanaPort/api/datasources/uid/$($datasource.uid)/health" -Headers $headers -TimeoutSec 10
+
+    if ($datasourceHealth.status -ne 'OK') {
+        throw "Grafana Prometheus datasource is unhealthy: $($datasourceHealth.message)"
+    }
+    Write-Log 'Grafana Prometheus datasource is healthy.'
+}
+
 function Show-Summary {
     $nginxPort = Read-EnvValue -Name 'NGINX_HTTP_PORT' -Fallback '9000'
     $jenkinsPort = Read-EnvValue -Name 'JENKINS_HTTP_PORT' -Fallback '49000'
@@ -466,12 +568,14 @@ if ($Check) {
     Validate-Configuration
     Test-Services
     Test-Endpoints
+    Test-ObservabilityIntegrations
     Show-Summary
     exit 0
 }
 
 Ensure-Environment
 Prepare-HostHome
+Ensure-AvailableHostPorts
 Validate-Configuration
 
 if ($Update) {
@@ -482,7 +586,15 @@ if ($Update) {
 }
 
 Write-Log "Starting the $StackMode stack."
-Invoke-Compose -Arguments @('up', '--detach', '--build')
+if ($Update) {
+    Invoke-Compose -Arguments @('up', '--detach')
+}
+else {
+    Invoke-Compose -Arguments @('up', '--detach', '--build')
+}
+Write-Log 'Refreshing the Nginx upstream after service reconciliation.'
+Invoke-Compose -Arguments @('restart', 'nginx')
 Wait-ForServices
 Test-Endpoints
+Test-ObservabilityIntegrations
 Show-Summary

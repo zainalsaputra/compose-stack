@@ -186,7 +186,8 @@ Both platform scripts perform the following operations:
 6. Validates the merged Compose configuration.
 7. Builds and starts the requested services.
 8. Waits for service readiness and verifies the HTTP endpoints.
-9. Displays the service URLs and the initial Jenkins administrator password when available.
+9. On Windows observability runs, verifies every Prometheus target and the Grafana datasource.
+10. Displays the service URLs and the initial Jenkins administrator password when available.
 
 The scripts are safe to run repeatedly. They do not remove containers, networks, named volumes, backups, or an existing `.env` file. Destructive reset operations remain manual.
 
@@ -350,7 +351,7 @@ docker compose -f compose.yaml -f compose.observability.yaml down -v
 
 ## Security Notes
 
-- The Docker-in-Docker daemon port `2376` is bound to `127.0.0.1` on the host, not to all network interfaces.
+- The Docker-in-Docker daemon port `2376` is not published to the host.
 - Jenkins accesses Docker-in-Docker through the internal Docker network using `tcp://docker:2376`.
 - The `docker:dind` service runs with `privileged: true`, which is required for this Docker-in-Docker setup.
 - Do not commit `.env`; it contains local configuration and credentials.
