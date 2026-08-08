@@ -57,9 +57,6 @@ services:
           - docker
     environment:
       DOCKER_TLS_CERTDIR: /certs
-    ports:
-      - "127.0.0.1:${DOCKER_DIND_PORT:-2376}:2376"
-      - "${DIND_APP_PORT:-3000}:3000"
     volumes:
       - jenkins-docker-certs:/certs/client
       - jenkins-data:/var/jenkins_home
