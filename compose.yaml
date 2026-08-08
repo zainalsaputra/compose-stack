@@ -34,9 +34,11 @@ services:
     depends_on:
       jenkins:
         condition: service_started
-      grafana:
+      docker:
         condition: service_started
       prometheus:
+        condition: service_started
+      grafana:
         condition: service_started
     networks:
       - ci
