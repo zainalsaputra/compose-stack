@@ -16,6 +16,8 @@ The stack is designed to be cloned and operated from a single root directory, fo
 +-- compose.observability.yaml
 +-- Dockerfile
 +-- .env.example
++-- setup.sh
++-- setup.ps1
 +-- nginx/
 |   +-- default.conf
 +-- prometheus/
@@ -35,10 +37,10 @@ There is no dedicated `jenkins/` directory in this non-separated layout. Jenkins
 | `jenkins` | Jenkins LTS with Blue Ocean, Docker CLI, Pipeline, Docker Workflow, and Prometheus plugin. |
 | `nginx` | Reverse proxy for Jenkins using `nginx/default.conf`. |
 | `docker` | Docker-in-Docker daemon with TLS enabled and the internal network alias `docker`. |
-| `prometheus` | Metrics scraper for Jenkins, host metrics, and container metrics. |
-| `grafana` | Dashboard UI with Prometheus provisioned as the default datasource. |
-| `node-exporter` | Host-level metrics exporter for Ubuntu. |
-| `cadvisor` | Container-level metrics exporter for Docker workloads. |
+| `prometheus` | Optional metrics scraper for Jenkins, host metrics, and container metrics. |
+| `grafana` | Optional dashboard UI with Prometheus provisioned as the default datasource. |
+| `node-exporter` | Optional Linux host metrics exporter. On Docker Desktop, it observes the Linux VM rather than Windows itself. |
+| `cadvisor` | Optional container-level metrics exporter for Docker workloads. |
 
 ## Data Storage
 
@@ -66,6 +68,8 @@ sudo mkdir -p /srv/jenkins/home
 sudo chown -R 1000:1000 /srv/jenkins/home
 ```
 
+On Windows, `setup.ps1` replaces the default Linux path with an absolute `data/jenkins-home` path inside the repository and creates the directory automatically.
+
 If you later choose to use repository-local bind mounts, place them under `data/`. The `data/` directory is ignored by Git.
 
 ## Networking
@@ -86,11 +90,14 @@ Internal service discovery uses Docker DNS:
 
 ## Prerequisites
 
-Install the following on the Ubuntu server:
+Common requirements:
 
-- Docker Engine
-- Docker Compose plugin
+- Internet access for package, image, and plugin downloads
 - Git
+
+Ubuntu additionally requires either a root shell or a non-root user with `sudo` access. Docker Engine and the Docker Compose plugin are installed automatically when unavailable.
+
+Windows requires Windows 10 or 11 with hardware virtualization enabled. Docker Desktop is installed through `winget` when unavailable; its installer may display a Windows UAC prompt or request a restart. Docker Desktop must use Linux containers.
 
 Recommended deployment path:
 
@@ -101,6 +108,90 @@ sudo chown -R "$USER:$USER" /opt/compose-stack
 
 Clone or copy this repository into `/opt/compose-stack`.
 
+## One-Command Setup
+
+### Ubuntu
+
+Start the core stack:
+
+```bash
+cd /opt/compose-stack
+bash setup.sh
+```
+
+Start the complete stack with Prometheus, Grafana, node-exporter, and cAdvisor:
+
+```bash
+cd /opt/compose-stack
+bash setup.sh --with-observability
+```
+
+The commands above assume that the current shell is already running as `root`. From a non-root account, prefix setup and update commands with `sudo`, for example `sudo bash setup.sh`. The `--check` mode does not require root when the current user has permission to access Docker.
+
+Ubuntu modes:
+
+| Command | Purpose |
+| --- | --- |
+| `bash setup.sh` | Install or start the core stack from a root shell. |
+| `bash setup.sh --with-observability` | Install or start the full monitoring stack from a root shell. |
+| `bash setup.sh --check` | Validate and check an existing core deployment without changing it. |
+| `bash setup.sh --with-observability --check` | Validate and check an existing full deployment. |
+| `bash setup.sh --update` | Pull service images, rebuild Jenkins, and apply the core stack from a root shell. |
+| `bash setup.sh --with-observability --update` | Update and apply the full stack from a root shell. |
+| `bash setup.sh --skip-docker-install` | Start the stack but fail if Docker is unavailable. |
+
+### Windows
+
+Run the core stack from PowerShell without `sudo`:
+
+```powershell
+Set-Location C:\path\to\compose-stack
+.\setup.ps1
+```
+
+Run the complete stack with observability:
+
+```powershell
+.\setup.ps1 -WithObservability
+```
+
+Windows modes:
+
+| Command | Purpose |
+| --- | --- |
+| `.\setup.ps1` | Install Docker Desktop when required, then start the core stack. |
+| `.\setup.ps1 -WithObservability` | Install or start the full monitoring stack. |
+| `.\setup.ps1 -Check` | Validate and check an existing core deployment without changing it. |
+| `.\setup.ps1 -WithObservability -Check` | Validate and check an existing full deployment. |
+| `.\setup.ps1 -Update` | Pull service images, rebuild Jenkins, and apply the core stack. |
+| `.\setup.ps1 -WithObservability -Update` | Update and apply the full stack. |
+| `.\setup.ps1 -SkipDockerInstall` | Start the stack but fail if Docker Desktop is unavailable. |
+| `.\setup.ps1 -Help` | Display the Windows setup options and examples. |
+
+If the PowerShell execution policy blocks local scripts, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WithObservability
+```
+
+The Windows script starts Docker Desktop when needed and waits for its daemon. Complete any Docker Desktop first-run, WSL 2, or license prompts shown on screen. Observability containers run inside Docker Desktop's Linux VM; node-exporter does not expose native Windows host metrics.
+
+Both platform scripts perform the following operations:
+
+1. Verifies the platform and Docker requirements.
+2. Installs the platform's Docker runtime when required.
+3. Creates `.env` from `.env.example` without replacing an existing `.env`.
+4. Replaces the default Grafana password with a generated password when observability is enabled.
+5. Validates and creates the configured Jenkins shared directory.
+6. Validates the merged Compose configuration.
+7. Builds and starts the requested services.
+8. Waits for service readiness and verifies the HTTP endpoints.
+9. Displays the service URLs and the initial Jenkins administrator password when available.
+
+The scripts are safe to run repeatedly. They do not remove containers, networks, named volumes, backups, or an existing `.env` file. Destructive reset operations remain manual.
+
+Internet access is required when Docker, packages, container images, or Jenkins plugins must be downloaded. Review `.env` after the first setup, especially ports, `HOST_HOME`, and credentials.
+
 ## Configuration
 
 Create the local environment file:
@@ -108,6 +199,12 @@ Create the local environment file:
 ```bash
 cd /opt/compose-stack
 cp .env.example .env
+```
+
+On Windows PowerShell, use:
+
+```powershell
+Copy-Item .env.example .env
 ```
 
 Review and update `.env` before starting the stack. Important values:
@@ -123,7 +220,6 @@ Review and update `.env` before starting the stack. Important values:
 | `HOST_HOME` | `/srv/jenkins/home` | Host directory mounted to `/home` in Jenkins. |
 | `PROMETHEUS_PORT` | `9090` | Prometheus HTTP port on the host. |
 | `GRAFANA_PORT` | `3030` | Grafana HTTP port on the host. |
-| `GRAFANA_INTERNAL_PORT` | `3030` | Grafana HTTP port inside the container, mapped through `GF_SERVER_HTTP_PORT`. |
 | `GRAFANA_ADMIN_PASSWORD` | `change-me` | Initial Grafana admin password. Change this before production use. |
 
 Prepare the shared host directory:
@@ -138,6 +234,7 @@ sudo chown -R 1000:1000 /srv/jenkins/home
 Start Jenkins, Nginx, and Docker-in-Docker:
 
 ```bash
+docker compose config --quiet
 docker compose up -d --build
 ```
 
@@ -157,9 +254,10 @@ docker compose exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword
 
 ## Start With Observability
 
-Start the full stack including Prometheus, Grafana, node-exporter, and cAdvisor:
+Validate and start the full stack including Prometheus, Grafana, node-exporter, and cAdvisor:
 
 ```bash
+docker compose -f compose.yaml -f compose.observability.yaml config --quiet
 docker compose -f compose.yaml -f compose.observability.yaml up -d --build
 ```
 
@@ -179,10 +277,16 @@ The observability Compose file is equivalent to these base commands, with persis
 
 ```bash
 docker run -d --name prometheus -p 9090:9090 prom/prometheus
-docker run -d --name grafana -p 3030:3030 -e "GF_SERVER_HTTP_PORT=3030" grafana/grafana
+docker run -d --name grafana -p 3030:3000 grafana/grafana
 ```
 
-On Ubuntu, Prometheus uses `host.docker.internal:9000` to scrape Jenkins through Nginx. The Compose file maps `host.docker.internal` to Docker's `host-gateway` automatically.
+Prometheus scrapes Jenkins, node-exporter, and cAdvisor through Docker DNS on the internal Compose networks. Prometheus and Grafana are exposed directly on their configured host ports; Nginx is dedicated to Jenkins.
+
+Verify the monitoring targets after startup:
+
+1. Open `http://SERVER_IP:9090/targets`.
+2. Confirm that `prometheus`, `jenkins`, `node-exporter`, and `cadvisor` are `UP`.
+3. Open Grafana and confirm that the provisioned Prometheus datasource is healthy.
 
 ## Backup And Restore
 
@@ -212,6 +316,12 @@ Check service status:
 
 ```bash
 docker compose ps
+```
+
+For the observability stack, always include both Compose files:
+
+```bash
+docker compose -f compose.yaml -f compose.observability.yaml ps
 ```
 
 Follow Jenkins logs:
