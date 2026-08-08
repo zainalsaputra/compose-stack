@@ -18,6 +18,7 @@ services:
       DOCKER_CERT_PATH: /certs/client
       DOCKER_TLS_VERIFY: "1"
       JAVA_OPTS: ${JENKINS_JAVA_OPTS:--Dhudson.plugins.git.GitSCM.ALLOW_LOCAL_CHECKOUT=true}
+      JENKINS_OPTS: "--prefix=/jenkins"
     ports:
       - "${JENKINS_HTTP_PORT:-49000}:8080"
       - "${JENKINS_AGENT_PORT:-50000}:50000"
@@ -32,6 +33,10 @@ services:
     restart: unless-stopped
     depends_on:
       jenkins:
+        condition: service_started
+      grafana:
+        condition: service_started
+      prometheus:
         condition: service_started
     networks:
       - ci
@@ -58,6 +63,36 @@ services:
       - jenkins-docker-certs:/certs/client
       - jenkins-data:/var/jenkins_home
 
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    restart: unless-stopped
+    networks:
+      - ci
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.external-url=http://100.74.63.21/prometheus/"
+      - "--web.route-prefix=/prometheus"
+
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    restart: unless-stopped
+    networks:
+      - ci
+    ports:
+      - "${GRAFANA_PORT:-3031}:3000"
+    environment:
+      GF_SERVER_ROOT_URL: "http://100.74.63.21/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    volumes:
+      - grafana-data:/var/lib/grafana
+
 networks:
   ci:
     name: ${CI_NETWORK_NAME:-compose-stack-ci}
@@ -68,3 +103,7 @@ volumes:
     name: ${JENKINS_DATA_VOLUME:-compose-stack-jenkins-data}
   jenkins-docker-certs:
     name: ${JENKINS_DOCKER_CERTS_VOLUME:-compose-stack-jenkins-docker-certs}
+  prometheus-data:
+    name: ${PROMETHEUS_DATA_VOLUME:-compose-stack-prometheus-data}
+  grafana-data:
+    name: ${GRAFANA_DATA_VOLUME:-compose-stack-grafana-data}
