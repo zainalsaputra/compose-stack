@@ -6,8 +6,6 @@ services:
     networks:
       - ci
       - observability
-    extra_hosts:
-      - host.docker.internal:host-gateway
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -28,12 +26,11 @@ services:
     networks:
       - observability
     environment:
-      GF_SERVER_HTTP_PORT: ${GRAFANA_INTERNAL_PORT:-3030}
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me}
       GF_USERS_ALLOW_SIGN_UP: "false"
     ports:
-      - "${GRAFANA_PORT:-3030}:${GRAFANA_INTERNAL_PORT:-3030}"
+      - "${GRAFANA_PORT:-3030}:3000"
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
