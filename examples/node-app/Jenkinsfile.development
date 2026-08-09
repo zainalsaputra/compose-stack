@@ -1,0 +1,175 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'NODE_IMAGE', defaultValue: 'node:22-bookworm-slim', description: 'Pinned Node.js build image.')
+        string(name: 'REGISTRY_HOST', defaultValue: 'registry.example.com', description: 'Container registry hostname.')
+        string(name: 'IMAGE_REPOSITORY', defaultValue: 'team/node-app', description: 'Repository path inside the registry.')
+        string(name: 'DEVELOPMENT_HOST', defaultValue: 'dev.example.com', description: 'Development deployment host.')
+        string(name: 'DEVELOPMENT_DEPLOY_PATH', defaultValue: '/opt/node-app', description: 'Remote directory containing compose.yaml.')
+        string(name: 'DEVELOPMENT_HEALTH_URL', defaultValue: 'https://dev.example.com/health', description: 'Public development health endpoint.')
+    }
+
+    environment {
+        REGISTRY_CREDENTIALS_ID = 'docker-registry'
+        DEVELOPMENT_SSH_CREDENTIALS_ID = 'development-deploy-ssh'
+        DEVELOPMENT_KNOWN_HOSTS_ID = 'development-known-hosts'
+        DOCKER_CONFIG = "${WORKSPACE}/.docker"
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds(abortPrevious: true)
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 45, unit: 'MINUTES')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Prepare Metadata') {
+            steps {
+                script {
+                    if (!(params.REGISTRY_HOST ==~ /[A-Za-z0-9.-]+(?::[0-9]+)?/)) {
+                        error('REGISTRY_HOST contains unsupported characters.')
+                    }
+                    if (!(params.IMAGE_REPOSITORY ==~ /[A-Za-z0-9._\/-]+/)) {
+                        error('IMAGE_REPOSITORY contains unsupported characters.')
+                    }
+                    if (!(params.DEVELOPMENT_HOST ==~ /[A-Za-z0-9.-]+/)) {
+                        error('DEVELOPMENT_HOST contains unsupported characters.')
+                    }
+                    if (!(params.DEVELOPMENT_DEPLOY_PATH ==~ /\/[A-Za-z0-9._\/-]+/)) {
+                        error('DEVELOPMENT_DEPLOY_PATH must be a safe absolute Linux path.')
+                    }
+                    if (!(params.DEVELOPMENT_HEALTH_URL ==~ /https?:\/\/[A-Za-z0-9._~:\/?#\[\]@!$&()*+,;=%-]+/)) {
+                        error('DEVELOPMENT_HEALTH_URL is invalid.')
+                    }
+                    env.IMAGE_TAG = sh(returnStdout: true, script: 'git rev-parse --short=12 HEAD').trim()
+                    env.IMAGE_REF = "${params.REGISTRY_HOST}/${params.IMAGE_REPOSITORY}:${env.IMAGE_TAG}"
+                }
+                sh '''
+                    set -eu
+                    test -f package-lock.json
+                    test -f Dockerfile
+                    mkdir -p "$DOCKER_CONFIG"
+                    chmod 700 "$DOCKER_CONFIG"
+                '''
+            }
+        }
+
+        stage('Install, Lint, Test, Build') {
+            steps {
+                script {
+                    docker.image(params.NODE_IMAGE).inside('-u 0:0') {
+                        sh '''
+                            set -eu
+                            npm ci
+                            npm run lint --if-present
+                            CI=true npm test --if-present
+                            npm run build
+                        '''
+                    }
+                }
+            }
+            post {
+                always {
+                    junit testResults: 'reports/**/*.xml', allowEmptyResults: true
+                    archiveArtifacts artifacts: 'build/**,dist/**,coverage/**', allowEmptyArchive: true, fingerprint: true
+                }
+            }
+        }
+
+        stage('Build Image') {
+            steps {
+                sh '''
+                    set -eu
+                    docker build --pull --tag "$IMAGE_REF" .
+                    docker image inspect "$IMAGE_REF" >/dev/null
+                '''
+            }
+        }
+
+        stage('Push Image') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: env.REGISTRY_CREDENTIALS_ID,
+                    usernameVariable: 'REGISTRY_USERNAME',
+                    passwordVariable: 'REGISTRY_PASSWORD'
+                )]) {
+                    sh '''
+                        set +x
+                        printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY_HOST" --username "$REGISTRY_USERNAME" --password-stdin
+                        set -x
+                        docker push "$IMAGE_REF"
+                    '''
+                    script {
+                        env.DEPLOY_IMAGE_REF = sh(
+                            returnStdout: true,
+                            script: '''docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE_REF"'''
+                        ).trim()
+                        if (!(env.DEPLOY_IMAGE_REF ==~ /[^\s]+@sha256:[a-fA-F0-9]{64}/)) {
+                            error('The registry did not return an immutable image digest after push.')
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Deploy Development') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: env.DEVELOPMENT_SSH_CREDENTIALS_ID,
+                        keyFileVariable: 'DEPLOY_SSH_KEY',
+                        usernameVariable: 'DEPLOY_SSH_USER'
+                    ),
+                    file(credentialsId: env.DEVELOPMENT_KNOWN_HOSTS_ID, variable: 'DEPLOY_KNOWN_HOSTS')
+                ]) {
+                    sh '''
+                        set -eu
+                        ssh \
+                          -i "$DEPLOY_SSH_KEY" \
+                          -o BatchMode=yes \
+                          -o StrictHostKeyChecking=yes \
+                          -o UserKnownHostsFile="$DEPLOY_KNOWN_HOSTS" \
+                          "$DEPLOY_SSH_USER@$DEVELOPMENT_HOST" \
+                          "cd '$DEVELOPMENT_DEPLOY_PATH' && IMAGE_REF='$DEPLOY_IMAGE_REF' docker compose pull app && IMAGE_REF='$DEPLOY_IMAGE_REF' docker compose up -d --no-build app"
+                    '''
+                }
+            }
+        }
+
+        stage('Verify Development') {
+            steps {
+                retry(10) {
+                    sleep time: 6, unit: 'SECONDS'
+                    sh 'curl --fail --silent --show-error --max-time 10 "$DEVELOPMENT_HEALTH_URL" >/dev/null'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh '''
+                docker logout "$REGISTRY_HOST" >/dev/null 2>&1 || true
+                if [ -n "${IMAGE_REF:-}" ]; then
+                    docker image rm "$IMAGE_REF" >/dev/null 2>&1 || true
+                fi
+                rm -rf "$DOCKER_CONFIG"
+            '''
+            deleteDir()
+        }
+        success {
+            echo "Development deployment completed with immutable image ${env.DEPLOY_IMAGE_REF}."
+        }
+        failure {
+            echo 'Development pipeline failed. Review the failed stage and retained Jenkins logs.'
+        }
+    }
+}
