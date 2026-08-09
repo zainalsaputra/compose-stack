@@ -193,6 +193,29 @@ The scripts are safe to run repeatedly. They do not remove containers, networks,
 
 Internet access is required when Docker, packages, container images, or Jenkins plugins must be downloaded. Review `.env` after the first setup, especially ports, `HOST_HOME`, and credentials.
 
+## Jenkins Pipeline Examples
+
+Production-oriented Node.js pipeline references are available under `examples/node-app`:
+
+- [`Jenkinsfile.development`](examples/node-app/Jenkinsfile.development) builds, tests, pushes, deploys, and verifies an immutable image digest in development.
+- [`Jenkinsfile.production`](examples/node-app/Jenkinsfile.production) promotes an existing digest with security scanning, authorized approval, health verification, and rollback.
+- [`compose.deploy.example.yaml`](examples/node-app/compose.deploy.example.yaml) defines the remote Compose service contract expected by both pipelines.
+- [`examples/node-app/README.md`](examples/node-app/README.md) documents credentials, registry requirements, remote host preparation, and required customization.
+
+The templates deploy to remote Ubuntu hosts over SSH with strict host-key verification. They are reference implementations and must be adapted to the application, registry, environments, and organizational release policy before production use.
+
+The Jenkins image includes the OpenSSH client required by these examples. Rebuild an existing installation after pulling this change:
+
+```bash
+bash setup.sh --update
+```
+
+On Windows:
+
+```powershell
+.\setup.ps1 -Update
+```
+
 ## Configuration
 
 Create the local environment file:
