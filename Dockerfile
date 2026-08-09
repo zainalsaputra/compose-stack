@@ -7,6 +7,7 @@ RUN apt-get update \
         ca-certificates \
         curl \
         lsb-release \
+        openssh-client \
     && curl -fsSLo /usr/share/keyrings/docker-archive-keyring.asc \
         https://download.docker.com/linux/debian/gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.asc] https://download.docker.com/linux/debian $(lsb_release -cs) stable" \
