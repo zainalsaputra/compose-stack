@@ -1,0 +1,241 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'IMAGE_DIGEST', defaultValue: '', description: 'Required sha256 image digest produced by CI.')
+        string(name: 'TRIVY_IMAGE', defaultValue: '', description: 'Required Trivy image pinned by digest, for example aquasec/trivy@sha256:...')
+        string(name: 'REGISTRY_HOST', defaultValue: 'registry.example.com', description: 'Container registry hostname.')
+        string(name: 'IMAGE_REPOSITORY', defaultValue: 'team/node-app', description: 'Repository path inside the registry.')
+        string(name: 'PRODUCTION_HOST', defaultValue: 'prod.example.com', description: 'Production deployment host.')
+        string(name: 'PRODUCTION_DEPLOY_PATH', defaultValue: '/opt/node-app', description: 'Remote directory containing compose.yaml.')
+        string(name: 'PRODUCTION_HEALTH_URL', defaultValue: 'https://app.example.com/health', description: 'Public production health endpoint.')
+        string(name: 'PRODUCTION_APPROVERS', defaultValue: 'release-managers', description: 'Jenkins users or group allowed to approve production.')
+    }
+
+    environment {
+        REGISTRY_CREDENTIALS_ID = 'docker-registry'
+        PRODUCTION_SSH_CREDENTIALS_ID = 'production-deploy-ssh'
+        PRODUCTION_KNOWN_HOSTS_ID = 'production-known-hosts'
+        DOCKER_CONFIG = "${WORKSPACE}/.docker"
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timeout(time: 60, unit: 'MINUTES')
+    }
+
+    stages {
+        stage('Validate Release') {
+            steps {
+                checkout scm
+                script {
+                    if (!(params.IMAGE_DIGEST ==~ /sha256:[a-fA-F0-9]{64}/)) {
+                        error('IMAGE_DIGEST must be a complete sha256 digest produced by CI.')
+                    }
+                    if (!(params.REGISTRY_HOST ==~ /[A-Za-z0-9.-]+(?::[0-9]+)?/)) {
+                        error('REGISTRY_HOST contains unsupported characters.')
+                    }
+                    if (!(params.IMAGE_REPOSITORY ==~ /[A-Za-z0-9._\/-]+/)) {
+                        error('IMAGE_REPOSITORY contains unsupported characters.')
+                    }
+                    if (!(params.PRODUCTION_HOST ==~ /[A-Za-z0-9.-]+/)) {
+                        error('PRODUCTION_HOST contains unsupported characters.')
+                    }
+                    if (!(params.PRODUCTION_DEPLOY_PATH ==~ /\/[A-Za-z0-9._\/-]+/)) {
+                        error('PRODUCTION_DEPLOY_PATH must be a safe absolute Linux path.')
+                    }
+                    if (!(params.PRODUCTION_HEALTH_URL ==~ /https?:\/\/[A-Za-z0-9._~:\/?#\[\]@!$&()*+,;=%-]+/)) {
+                        error('PRODUCTION_HEALTH_URL is invalid.')
+                    }
+                    if (!(params.TRIVY_IMAGE ==~ /[^\s]+@sha256:[a-fA-F0-9]{64}/)) {
+                        error('TRIVY_IMAGE must be pinned with a sha256 digest.')
+                    }
+                    if (env.BRANCH_NAME && env.BRANCH_NAME != 'main' && !env.TAG_NAME) {
+                        error("Production deployment is restricted to main or a release tag. Current branch: ${env.BRANCH_NAME}")
+                    }
+                    env.IMAGE_REF = "${params.REGISTRY_HOST}/${params.IMAGE_REPOSITORY}@${params.IMAGE_DIGEST}"
+                }
+                sh '''
+                    set -eu
+                    mkdir -p "$DOCKER_CONFIG"
+                    chmod 700 "$DOCKER_CONFIG"
+                '''
+            }
+        }
+
+        stage('Pull Promoted Image') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: env.REGISTRY_CREDENTIALS_ID,
+                    usernameVariable: 'REGISTRY_USERNAME',
+                    passwordVariable: 'REGISTRY_PASSWORD'
+                )]) {
+                    sh '''
+                        set +x
+                        printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY_HOST" --username "$REGISTRY_USERNAME" --password-stdin
+                        set -x
+                        docker pull "$IMAGE_REF"
+                        docker image inspect "$IMAGE_REF" >/dev/null
+                    '''
+                }
+            }
+        }
+
+        stage('Security Gate') {
+            steps {
+                sh '''
+                    set -eu
+                    docker run --rm \
+                      --volume "$DOCKER_CONFIG:/root/.docker:ro" \
+                      "$TRIVY_IMAGE" \
+                      image --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL "$IMAGE_REF"
+                '''
+            }
+        }
+
+        stage('Production Approval') {
+            options {
+                timeout(time: 15, unit: 'MINUTES')
+            }
+            steps {
+                input(
+                    message: "Deploy ${env.IMAGE_REF} to production?",
+                    ok: 'Deploy Production',
+                    submitter: params.PRODUCTION_APPROVERS
+                )
+            }
+        }
+
+        stage('Capture Current Release') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: env.PRODUCTION_SSH_CREDENTIALS_ID,
+                        keyFileVariable: 'DEPLOY_SSH_KEY',
+                        usernameVariable: 'DEPLOY_SSH_USER'
+                    ),
+                    file(credentialsId: env.PRODUCTION_KNOWN_HOSTS_ID, variable: 'DEPLOY_KNOWN_HOSTS')
+                ]) {
+                    script {
+                        env.PREVIOUS_IMAGE = sh(
+                            returnStdout: true,
+                            script: '''
+                                ssh \
+                                  -i "$DEPLOY_SSH_KEY" \
+                                  -o BatchMode=yes \
+                                  -o StrictHostKeyChecking=yes \
+                                  -o UserKnownHostsFile="$DEPLOY_KNOWN_HOSTS" \
+                                  "$DEPLOY_SSH_USER@$PRODUCTION_HOST" \
+                                  "cd '$PRODUCTION_DEPLOY_PATH' && cat .release-image 2>/dev/null || true"
+                            '''
+                        ).trim()
+                    }
+                }
+            }
+        }
+
+        stage('Deploy Production') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: env.PRODUCTION_SSH_CREDENTIALS_ID,
+                        keyFileVariable: 'DEPLOY_SSH_KEY',
+                        usernameVariable: 'DEPLOY_SSH_USER'
+                    ),
+                    file(credentialsId: env.PRODUCTION_KNOWN_HOSTS_ID, variable: 'DEPLOY_KNOWN_HOSTS')
+                ]) {
+                    sh '''
+                        set -eu
+                        ssh \
+                          -i "$DEPLOY_SSH_KEY" \
+                          -o BatchMode=yes \
+                          -o StrictHostKeyChecking=yes \
+                          -o UserKnownHostsFile="$DEPLOY_KNOWN_HOSTS" \
+                          "$DEPLOY_SSH_USER@$PRODUCTION_HOST" \
+                          "cd '$PRODUCTION_DEPLOY_PATH' && IMAGE_REF='$IMAGE_REF' docker compose pull app && IMAGE_REF='$IMAGE_REF' docker compose up -d --no-build app"
+                    '''
+                }
+            }
+        }
+
+        stage('Verify and Record Release') {
+            steps {
+                script {
+                    try {
+                        retry(10) {
+                            sleep time: 6, unit: 'SECONDS'
+                            sh 'curl --fail --silent --show-error --max-time 10 "$PRODUCTION_HEALTH_URL" >/dev/null'
+                        }
+                    }
+                    catch (failure) {
+                        if (env.PREVIOUS_IMAGE?.trim()) {
+                            echo "Health verification failed. Rolling back to ${env.PREVIOUS_IMAGE}."
+                            withCredentials([
+                                sshUserPrivateKey(
+                                    credentialsId: env.PRODUCTION_SSH_CREDENTIALS_ID,
+                                    keyFileVariable: 'DEPLOY_SSH_KEY',
+                                    usernameVariable: 'DEPLOY_SSH_USER'
+                                ),
+                                file(credentialsId: env.PRODUCTION_KNOWN_HOSTS_ID, variable: 'DEPLOY_KNOWN_HOSTS')
+                            ]) {
+                                sh '''
+                                    ssh \
+                                      -i "$DEPLOY_SSH_KEY" \
+                                      -o BatchMode=yes \
+                                      -o StrictHostKeyChecking=yes \
+                                      -o UserKnownHostsFile="$DEPLOY_KNOWN_HOSTS" \
+                                      "$DEPLOY_SSH_USER@$PRODUCTION_HOST" \
+                                      "cd '$PRODUCTION_DEPLOY_PATH' && IMAGE_REF='$PREVIOUS_IMAGE' docker compose pull app && IMAGE_REF='$PREVIOUS_IMAGE' docker compose up -d --no-build app"
+                                '''
+                            }
+                        }
+                        else {
+                            echo 'No previous release metadata is available; automatic rollback was skipped.'
+                        }
+                        throw failure
+                    }
+
+                    withCredentials([
+                        sshUserPrivateKey(
+                            credentialsId: env.PRODUCTION_SSH_CREDENTIALS_ID,
+                            keyFileVariable: 'DEPLOY_SSH_KEY',
+                            usernameVariable: 'DEPLOY_SSH_USER'
+                        ),
+                        file(credentialsId: env.PRODUCTION_KNOWN_HOSTS_ID, variable: 'DEPLOY_KNOWN_HOSTS')
+                    ]) {
+                        sh '''
+                            printf '%s\n' "$IMAGE_REF" | ssh \
+                              -i "$DEPLOY_SSH_KEY" \
+                              -o BatchMode=yes \
+                              -o StrictHostKeyChecking=yes \
+                              -o UserKnownHostsFile="$DEPLOY_KNOWN_HOSTS" \
+                              "$DEPLOY_SSH_USER@$PRODUCTION_HOST" \
+                              "cd '$PRODUCTION_DEPLOY_PATH' && cat > .release-image"
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh '''
+                docker logout "$REGISTRY_HOST" >/dev/null 2>&1 || true
+                if [ -n "${IMAGE_REF:-}" ]; then
+                    docker image rm "$IMAGE_REF" >/dev/null 2>&1 || true
+                fi
+                rm -rf "$DOCKER_CONFIG"
+            '''
+            deleteDir()
+        }
+        success {
+            echo "Production deployment completed with immutable image ${env.IMAGE_REF}."
+        }
+        failure {
+            echo 'Production pipeline failed. Review the failed stage and rollback output.'
+        }
+    }
+}
