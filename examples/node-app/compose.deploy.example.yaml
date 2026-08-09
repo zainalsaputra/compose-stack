@@ -1,0 +1,8 @@
+services:
+  app:
+    image: ${IMAGE_REF:?IMAGE_REF is required}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+    ports:
+      - "${APP_PORT:-8080}:${CONTAINER_PORT:-3000}"
