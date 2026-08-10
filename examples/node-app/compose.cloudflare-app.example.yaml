@@ -1,0 +1,13 @@
+services:
+  app:
+    image: ${IMAGE_REF:?IMAGE_REF is required}
+    restart: unless-stopped
+    expose:
+      - "3000"
+    networks:
+      - app-ingress
+
+networks:
+  app-ingress:
+    external: true
+    name: ${APP_INGRESS_NETWORK_NAME:-compose-stack-app-ingress}
