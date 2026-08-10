@@ -17,3 +17,14 @@ services:
       - ci
     environment:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    command:
+      - tunnel
+      - --no-autoupdate
+      - --protocol
+      - ${CLOUDFLARE_TUNNEL_PROTOCOL:-http2}
+      - run
+
+networks:
+  observability:
+    name: ${OBSERVABILITY_NETWORK_NAME:-compose-stack-observability}
+    driver: bridge
