@@ -1,4 +1,11 @@
 services:
+  nginx:
+    networks:
+      - app-ingress
+    volumes:
+      - ./nginx/cloudflare-default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./runtime/nginx/apps:/etc/nginx/app-routes:ro
+
   cloudflared:
     image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}
     container_name: compose-stack-cloudflared
@@ -18,4 +25,7 @@ services:
 networks:
   observability:
     name: ${OBSERVABILITY_NETWORK_NAME:-compose-stack-observability}
+    driver: bridge
+  app-ingress:
+    name: ${APP_INGRESS_NETWORK_NAME:-compose-stack-app-ingress}
     driver: bridge
