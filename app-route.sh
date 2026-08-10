@@ -2,55 +2,57 @@
 
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/.env"
-ROUTE_DIR="${SCRIPT_DIR}/runtime/nginx/apps"
-NGINX_CONTAINER="jenkins-nginx"
+NGINX_CONTAINER="${NGINX_CONTAINER:-jenkins-nginx}"
+ROUTE_MOUNT_DEST="/etc/nginx/app-routes"
 
 log() { printf '[compose-stack] %s\n' "$*"; }
 die() { printf '[compose-stack] ERROR: %s\n' "$*" >&2; exit 1; }
 
-read_env_value() {
-  local key="$1" fallback="$2" value
-  value="$(awk -F= -v wanted="${key}" '$1 == wanted { print substr($0, index($0, "=") + 1); exit }' "${ENV_FILE}" 2>/dev/null || true)"
-  value="${value%$'\r'}"; value="${value%\"}"; value="${value#\"}"
-  printf '%s' "${value:-${fallback}}"
-}
-
 usage() {
   cat <<'EOF'
 Usage:
-  sudo bash app-route.sh register --host <hostname> --upstream <service:port>
-  sudo bash app-route.sh remove --host <hostname>
-  bash app-route.sh list
+  app-route.sh register --host <hostname> --upstream <service:port>
+  app-route.sh remove --host <hostname>
+  app-route.sh list
 
 Examples:
-  sudo bash app-route.sh register \
+  app-route.sh register \
     --host orders.apps.example.com \
     --upstream orders:3000
 
-  sudo bash app-route.sh remove --host orders.apps.example.com
+  app-route.sh remove --host orders.apps.example.com
 EOF
 }
 
 validate_host() {
-  local host="$1" suffix
+  local host="$1" suffix="${APP_DOMAIN_SUFFIX:-}"
   [[ "${host}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || die "Invalid hostname: ${host}"
-  suffix="$(read_env_value APP_DOMAIN_SUFFIX '')"
   if [[ -n "${suffix}" && "${suffix}" != "apps.example.com" ]]; then
     [[ "${host}" == *."${suffix}" ]] || die "Hostname must be under APP_DOMAIN_SUFFIX=${suffix}."
   fi
 }
 
 validate_upstream() {
-  local upstream="$1"
+  local upstream="$1" port
   [[ "${upstream}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*:[0-9]{1,5}$ ]] || die "Upstream must use service:port format, for example app:3000."
-  local port="${upstream##*:}"
+  port="${upstream##*:}"
   ((port >= 1 && port <= 65535)) || die "Upstream port must be between 1 and 65535."
 }
 
 safe_name() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9.-' '-'
+}
+
+route_source_dir() {
+  docker inspect "${NGINX_CONTAINER}" \
+    --format '{{range .Mounts}}{{if eq .Destination "/etc/nginx/app-routes"}}{{.Source}}{{end}}{{end}}'
+}
+
+require_route_source() {
+  local route_source
+  route_source="$(route_source_dir)"
+  [[ -n "${route_source}" ]] || die "Cannot find ${ROUTE_MOUNT_DEST} bind mount on ${NGINX_CONTAINER}."
+  printf '%s' "${route_source}"
 }
 
 nginx_config_valid() {
@@ -63,15 +65,40 @@ reload_nginx() {
   log "Nginx configuration reloaded."
 }
 
+write_route_file() {
+  local route_source="$1" filename="$2" content="$3"
+  printf '%s' "${content}" | docker run --rm -i \
+    -v "${route_source}:/routes" \
+    alpine:3.20 \
+    sh -c 'cat > "/routes/$1.new" && chmod 0644 "/routes/$1.new" && if [ -f "/routes/$1" ]; then cp "/routes/$1" "/routes/$1.backup"; fi && mv "/routes/$1.new" "/routes/$1"' \
+    sh "${filename}"
+}
+
+rollback_route_file() {
+  local route_source="$1" filename="$2"
+  docker run --rm \
+    -v "${route_source}:/routes" \
+    alpine:3.20 \
+    sh -c 'if [ -f "/routes/$1.backup" ]; then mv "/routes/$1.backup" "/routes/$1"; else rm -f "/routes/$1"; fi' \
+    sh "${filename}"
+}
+
+cleanup_backup() {
+  local route_source="$1" filename="$2"
+  docker run --rm \
+    -v "${route_source}:/routes" \
+    alpine:3.20 \
+    rm -f "/routes/${filename}.backup"
+}
+
 register_route() {
-  local host="$1" upstream="$2" file temp backup=""
+  local host="$1" upstream="$2" route_source filename config
   validate_host "${host}"
   validate_upstream "${upstream}"
-  install -d -m 0755 "${ROUTE_DIR}"
-  file="${ROUTE_DIR}/$(safe_name "${host}").conf"
-  temp="$(mktemp "${file}.XXXXXX")"
+  route_source="$(require_route_source)"
+  filename="$(safe_name "${host}").conf"
 
-  cat > "${temp}" <<EOF
+  config="$(cat <<EOF
 server {
     listen 80;
     server_name ${host};
@@ -91,49 +118,48 @@ server {
     }
 }
 EOF
+)"
 
-  chmod 0644 "${temp}"
-  if [[ -f "${file}" ]]; then
-    backup="$(mktemp "${file}.backup.XXXXXX")"
-    cp "${file}" "${backup}"
-  fi
-  mv "${temp}" "${file}"
+  write_route_file "${route_source}" "${filename}" "${config}"
 
   if ! reload_nginx; then
-    if [[ -n "${backup}" ]]; then
-      mv "${backup}" "${file}"
-    else
-      rm -f "${file}"
-    fi
+    rollback_route_file "${route_source}" "${filename}"
     nginx_config_valid || true
     die "Route registration failed; previous Nginx configuration was restored."
   fi
-  [[ -z "${backup}" ]] || rm -f "${backup}"
+
+  cleanup_backup "${route_source}" "${filename}"
   log "Registered ${host} -> http://${upstream}."
 }
 
 remove_route() {
-  local host="$1" file backup
+  local host="$1" route_source filename
   validate_host "${host}"
-  file="${ROUTE_DIR}/$(safe_name "${host}").conf"
-  [[ -f "${file}" ]] || die "No route found for ${host}."
-  backup="$(mktemp "${file}.backup.XXXXXX")"
-  cp "${file}" "${backup}"
-  rm -f "${file}"
+  route_source="$(require_route_source)"
+  filename="$(safe_name "${host}").conf"
+
+  docker run --rm \
+    -v "${route_source}:/routes" \
+    alpine:3.20 \
+    sh -c '[ -f "/routes/$1" ] || exit 2; cp "/routes/$1" "/routes/$1.backup"; rm -f "/routes/$1"' \
+    sh "${filename}" || die "No route found for ${host}."
+
   if ! reload_nginx; then
-    mv "${backup}" "${file}"
+    rollback_route_file "${route_source}" "${filename}"
     die "Route removal failed; previous Nginx configuration was restored."
   fi
-  rm -f "${backup}"
+
+  cleanup_backup "${route_source}" "${filename}"
   log "Removed route for ${host}."
 }
 
 list_routes() {
-  if [[ ! -d "${ROUTE_DIR}" ]] || ! compgen -G "${ROUTE_DIR}/*.conf" >/dev/null; then
-    log "No application routes registered."
-    return 0
-  fi
-  grep -hE '^[[:space:]]*(server_name|proxy_pass)' "${ROUTE_DIR}"/*.conf | sed 's/^[[:space:]]*//'
+  local route_source
+  route_source="$(require_route_source)"
+  docker run --rm \
+    -v "${route_source}:/routes:ro" \
+    alpine:3.20 \
+    sh -c 'files=$(find /routes -maxdepth 1 -type f -name "*.conf" -print); [ -n "$files" ] || exit 0; grep -hE "^[[:space:]]*(server_name|proxy_pass)" $files | sed "s/^[[:space:]]*//"'
 }
 
 [[ $# -ge 1 ]] || { usage; exit 1; }
@@ -150,7 +176,6 @@ case "${command}" in
       esac
     done
     [[ -n "${host}" && -n "${upstream}" ]] || die "register requires --host and --upstream."
-    [[ "${EUID}" -eq 0 ]] || die "register requires root privileges."
     register_route "${host}" "${upstream}"
     ;;
   remove)
@@ -162,7 +187,6 @@ case "${command}" in
       esac
     done
     [[ -n "${host}" ]] || die "remove requires --host."
-    [[ "${EUID}" -eq 0 ]] || die "remove requires root privileges."
     remove_route "${host}"
     ;;
   list) list_routes ;;
