@@ -5,7 +5,9 @@ services:
     expose:
       - "3000"
     networks:
-      - app-ingress
+      app-ingress:
+        aliases:
+          - ${APP_INGRESS_ALIAS:?APP_INGRESS_ALIAS is required}
 
 networks:
   app-ingress:
