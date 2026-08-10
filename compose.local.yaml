@@ -1,0 +1,17 @@
+services:
+  jenkins:
+    ports:
+      - "${JENKINS_HTTP_PORT:-49000}:8080"
+      - "${JENKINS_AGENT_PORT:-50000}:50000"
+
+  nginx:
+    ports:
+      - "${NGINX_HTTP_PORT:-9000}:80"
+
+  prometheus:
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+
+  grafana:
+    ports:
+      - "${GRAFANA_PORT:-3030}:3000"
