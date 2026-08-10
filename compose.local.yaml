@@ -9,11 +9,3 @@ services:
       - "${NGINX_HTTP_PORT:-9000}:80"
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-
-  prometheus:
-    ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
-
-  grafana:
-    ports:
-      - "${GRAFANA_PORT:-3030}:3000"
