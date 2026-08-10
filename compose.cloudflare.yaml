@@ -1,20 +1,11 @@
 services:
-  nginx:
-    networks:
-      - ci
-      - observability
-    volumes:
-      - ./runtime/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-
   cloudflared:
     image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}
     container_name: compose-stack-cloudflared
     restart: unless-stopped
-    depends_on:
-      nginx:
-        condition: service_started
     networks:
       - ci
+      - observability
     environment:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
     command:
