@@ -1,8 +1,0 @@
-services:
-  prometheus:
-    ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
-
-  grafana:
-    ports:
-      - "${GRAFANA_PORT:-3030}:3000"
