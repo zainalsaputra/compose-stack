@@ -53,14 +53,18 @@ safe_name() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9.-' '-'
 }
 
+nginx_config_valid() {
+  docker exec "${NGINX_CONTAINER}" nginx -t >/dev/null 2>&1
+}
+
 reload_nginx() {
-  docker exec "${NGINX_CONTAINER}" nginx -t >/dev/null || die "Generated Nginx configuration is invalid."
+  nginx_config_valid || return 1
   docker exec "${NGINX_CONTAINER}" nginx -s reload >/dev/null
   log "Nginx configuration reloaded."
 }
 
 register_route() {
-  local host="$1" upstream="$2" file temp
+  local host="$1" upstream="$2" file temp backup=""
   validate_host "${host}"
   validate_upstream "${upstream}"
   install -d -m 0755 "${ROUTE_DIR}"
@@ -89,22 +93,38 @@ server {
 EOF
 
   chmod 0644 "${temp}"
+  if [[ -f "${file}" ]]; then
+    backup="$(mktemp "${file}.backup.XXXXXX")"
+    cp "${file}" "${backup}"
+  fi
   mv "${temp}" "${file}"
 
   if ! reload_nginx; then
-    rm -f "${file}"
-    die "Route registration failed."
+    if [[ -n "${backup}" ]]; then
+      mv "${backup}" "${file}"
+    else
+      rm -f "${file}"
+    fi
+    nginx_config_valid || true
+    die "Route registration failed; previous Nginx configuration was restored."
   fi
+  [[ -z "${backup}" ]] || rm -f "${backup}"
   log "Registered ${host} -> http://${upstream}."
 }
 
 remove_route() {
-  local host="$1" file
+  local host="$1" file backup
   validate_host "${host}"
   file="${ROUTE_DIR}/$(safe_name "${host}").conf"
   [[ -f "${file}" ]] || die "No route found for ${host}."
+  backup="$(mktemp "${file}.backup.XXXXXX")"
+  cp "${file}" "${backup}"
   rm -f "${file}"
-  reload_nginx
+  if ! reload_nginx; then
+    mv "${backup}" "${file}"
+    die "Route removal failed; previous Nginx configuration was restored."
+  fi
+  rm -f "${backup}"
   log "Removed route for ${host}."
 }
 
