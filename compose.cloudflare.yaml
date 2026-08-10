@@ -2,9 +2,11 @@ services:
   jenkins:
     group_add:
       - "${HOST_DOCKER_GID:-999}"
+    environment:
+      APP_DOMAIN_SUFFIX: ${APP_DOMAIN_SUFFIX:-apps.example.com}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${COMPOSE_STACK_HOST_PATH:-/opt/compose-stack}:/opt/compose-stack-host
+      - ./app-route.sh:/usr/local/bin/compose-stack-app-route:ro
 
   nginx:
     networks:
