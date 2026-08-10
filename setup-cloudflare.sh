@@ -206,16 +206,29 @@ check_services() {
   [[ "${failed}" == "false" ]] || die "One or more services are not ready."
 }
 
+probe_network_http() {
+  local network="$1" url="$2" name="$3"
+  docker run --rm \
+    --network "${network}" \
+    alpine:3.20 \
+    wget -q --spider --timeout=10 "${url}" \
+    || die "${name} is not reachable through Docker network '${network}': ${url}"
+  log "${name} is reachable through Docker network '${network}': ${url}"
+}
+
 verify_internal_endpoints() {
-  compose exec -T nginx wget -q --spider http://jenkins:8080/login || die "Nginx cannot reach Jenkins through the CI network."
-  log "Jenkins is reachable internally at http://jenkins:8080."
+  local ci_network observability_network
+  ci_network="$(read_env_value CI_NETWORK_NAME compose-stack-ci)"
+  observability_network="$(read_env_value OBSERVABILITY_NETWORK_NAME compose-stack-observability)"
+
+  probe_network_http "${ci_network}" "http://jenkins:8080/login" "Jenkins"
 
   if [[ "${STACK_MODE}" == "observability" ]]; then
+    probe_network_http "${observability_network}" "http://grafana:3000/api/health" "Grafana"
+
     curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:$(read_env_value PROMETHEUS_PORT 9090)/-/ready" >/dev/null \
       || die "Prometheus readiness endpoint is unavailable on loopback."
-    curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:$(read_env_value GRAFANA_PORT 3030)/api/health" >/dev/null \
-      || die "Grafana health endpoint is unavailable on loopback."
-    log "Observability endpoints are healthy."
+    log "Prometheus readiness endpoint is healthy on loopback."
   fi
 }
 
