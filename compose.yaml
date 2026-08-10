@@ -42,7 +42,7 @@ services:
       JENKINS_DOMAIN: ${JENKINS_DOMAIN:-localhost}
       GRAFANA_DOMAIN: ${GRAFANA_DOMAIN:-localhost}
     volumes:
-      - ./nginx/templates:/etc/nginx/templates:ro
+      - ./nginx/templates-local:/etc/nginx/templates:ro
 
   docker:
     image: docker:dind
